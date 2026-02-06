@@ -5,11 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response, Cookie
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import os
+import json
+import secrets
 from pathlib import Path
+from typing import Optional
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +21,15 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Load teacher credentials
+teachers_file = Path(__file__).parent.parent / "teachers.json"
+with open(teachers_file, "r") as f:
+    teachers_data = json.load(f)
+    TEACHERS = {t["username"]: t["password"] for t in teachers_data["teachers"]}
+
+# Simple session management (in-memory)
+SESSIONS = {}
 
 # In-memory activity database
 activities = {
@@ -88,9 +100,48 @@ def get_activities():
     return activities
 
 
+@app.post("/login")
+def login(username: str, password: str, response: Response):
+    """Authenticate a teacher"""
+    if username in TEACHERS and TEACHERS[username] == password:
+        # Create session token
+        session_token = secrets.token_urlsafe(32)
+        SESSIONS[session_token] = username
+        
+        # Set cookie
+        response = JSONResponse(content={"message": "Login successful", "username": username})
+        response.set_cookie(key="session_token", value=session_token, httponly=True)
+        return response
+    else:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+@app.post("/logout")
+def logout(response: Response, session_token: Optional[str] = Cookie(None)):
+    """Logout a teacher"""
+    if session_token and session_token in SESSIONS:
+        del SESSIONS[session_token]
+    
+    response = JSONResponse(content={"message": "Logged out successfully"})
+    response.delete_cookie(key="session_token")
+    return response
+
+
+@app.get("/auth/status")
+def check_auth(session_token: Optional[str] = Cookie(None)):
+    """Check if user is authenticated"""
+    if session_token and session_token in SESSIONS:
+        return {"authenticated": True, "username": SESSIONS[session_token]}
+    return {"authenticated": False}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+def signup_for_activity(activity_name: str, email: str, session_token: Optional[str] = Cookie(None)):
+    """Sign up a student for an activity (teachers only)"""
+    # Check authentication
+    if not session_token or session_token not in SESSIONS:
+        raise HTTPException(status_code=403, detail="Authentication required. Only teachers can register students.")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +162,12 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str, session_token: Optional[str] = Cookie(None)):
+    """Unregister a student from an activity (teachers only)"""
+    # Check authentication
+    if not session_token or session_token not in SESSIONS:
+        raise HTTPException(status_code=403, detail="Authentication required. Only teachers can unregister students.")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
